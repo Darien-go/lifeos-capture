@@ -1,307 +1,179 @@
 (() => {
   "use strict";
-  const labels = { mood: "Mood", meal: "Meals", habit: "Habit", task: "Task", note: "Quick note", journal: "Journal", english: "English", workout: "Workout", sleep: "Sleep", nap: "Nap" };
-  const types = ["mood", "meal", "habit", "task", "note", "journal", "english", "workout", "sleep", "nap"];
   const protocol = self.LifeOSOfflineProtocol;
   const { BundleSyncTransport, DirectLocalSyncTransport } = self.LifeOSSyncTransports;
   const { secureUuid, initializeCaptureRuntime } = self.LifeOSCaptureRuntime;
+  const { t, setLocale, getLocale, formatDate } = self.LifeOSCaptureI18n;
+  const { open: openDb, get, all, put, remove, clearBatch } = self.LifeOSCaptureStore;
   const bundleTransport = new BundleSyncTransport();
-  let activeTab = "mood";
+  const captureTypes = ["mood", "meal", "habit", "task", "note", "journal", "english", "workout", "sleep", "nap"];
+  const icons = { mood:"☺", meal:"⌁", habit:"✓", task:"□", note:"✎", journal:"▤", english:"A", workout:"◇", sleep:"☾", nap:"◐" };
+  const state = { view:"today", computer:"unpaired", lastErrorCode:null, syncPreview:null, syncing:false, diagnostics:{ indexeddb:"checking", secure:isSecureContext?"yes":"no", serviceWorker:"checking", offlineShell:"checking", device:"checking", storageError:"none" } };
   let toastTimer;
   const $ = selector => document.querySelector(selector);
-  const localDate = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, character => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[character]);
+  const localDate = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  const localTime = value => formatDate(new Date(value), { hour:"2-digit", minute:"2-digit", hour12:false });
   const uuid = secureUuid;
-  const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
-  const { open: openDb, get, all, put, remove, clearBatch } = self.LifeOSCaptureStore;
-  async function getDeviceId() { let row = await get("state", "deviceId"); if (!row) { row = { key: "deviceId", value: uuid() }; await put("state", row); } return row.value; }
-  function diagnostic(id, state, detail = "") { const node = $(`#diagnostic-${id}`); if (node) { node.textContent = detail ? `${state} · ${detail}` : state; node.dataset.state = state.toLowerCase().replaceAll(" ", "-"); } }
-  function showInitializationError(label, error) { const message = error instanceof Error ? error.message : String(error); $("#connection").textContent = `${label}: ${message}`; $("#connection").classList.add("offline"); toast(`${label}: ${message}`); }
+
+  async function getDeviceId() { let row = await get("state", "deviceId"); if (!row) { row = { key:"deviceId", value:uuid() }; await put("state", row); } return row.value; }
+  async function pairingState() { return (await get("state", "localSync"))?.value || null; }
+  async function savePairing(value) { await put("state", { key:"localSync", value }); }
+  function directTransport(pairing) { return new DirectLocalSyncTransport(pairing.hostUrl, pairing.syncToken); }
+  function splitTags(value) { return String(value || "").split(/[,，]/).map(item => item.trim()).filter(Boolean).slice(0,20); }
+  function valueOf(form, name) { return new FormData(form).get(name)?.toString().trim() || ""; }
+  function toast(message) { const node = $("#toast"); node.textContent = message; node.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => node.classList.remove("show"), 2600); }
+  function userError(error, fallback = "genericError") {
+    const code = error?.code || (error?.name === "AbortError" ? "network_error" : /failed to fetch|network|load failed/i.test(error?.message || "") ? "secure_connection_failed" : "unknown_error");
+    state.lastErrorCode = code;
+    const keys = { origin_rejected:"originRejected", invalid_pairing_code:"pairingInvalid", pairing_invalid:"pairingInvalid", pairing_code_expired:"pairingExpired", pairing_revoked:"pairingRevoked", unauthorized:"pairingRevoked", secure_connection_failed:"secureConnectionFailed", network_error:"networkError", server_mismatch:"serverMismatch" };
+    return t(keys[code] || fallback);
+  }
+  function field(label, name, type = "text", options = {}) {
+    const required = options.required ? "required" : ""; const full = options.full ? " full" : "";
+    if (type === "textarea") return `<label class="field${full}"><span>${esc(label)}</span><textarea name="${esc(name)}" ${required} maxlength="${options.max || 10000}" placeholder="${esc(options.placeholder || "")}"></textarea></label>`;
+    if (type === "select") return `<label class="field${full}"><span>${esc(label)}</span><select name="${esc(name)}">${options.options.map(option => `<option value="${esc(option.value)}">${esc(option.label)}</option>`).join("")}</select></label>`;
+    return `<label class="field${full}"><span>${esc(label)}</span><input name="${esc(name)}" type="${esc(type)}" ${required} ${options.min != null?`min="${options.min}"`:""} ${options.max != null?`max="${options.max}"`:""} value="${esc(options.value || "")}" placeholder="${esc(options.placeholder || "")}"></label>`;
+  }
+  const submitButton = label => `<button class="button primary wide" type="submit">${esc(label)}</button>`;
+
   async function addEvent(type, payload, occurredAt = new Date()) {
     const now = new Date().toISOString();
-    const event = { id: uuid(), deviceId: await getDeviceId(), type, payload, occurredAt: occurredAt.toISOString(), createdAt: now, version: 1 };
-    await put("events", event); await renderQueue(); toast("Saved on this device.");
+    const event = { id:uuid(), deviceId:await getDeviceId(), type, payload, occurredAt:occurredAt.toISOString(), createdAt:now, version:1 };
+    if (!protocol.validEvent(event)) throw new Error("invalid_event");
+    await put("events", event); await refreshUI(); return event;
   }
-  function toast(message) { const node = $("#toast"); node.textContent = message; node.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => node.classList.remove("show"), 2600); }
-  function field(label, name, kind = "text", options = {}) {
-    const full = options.full ? " full" : "";
-    if (kind === "textarea") return `<label class="field${full}">${esc(label)}<textarea name="${esc(name)}" ${options.required ? "required" : ""} maxlength="${options.max || 10000}" placeholder="${esc(options.placeholder || "")}"></textarea></label>`;
-    if (kind === "select") return `<label class="field${full}">${esc(label)}<select name="${esc(name)}">${options.options.map(item => { const option = typeof item === "string" ? { value: item, label: item } : item; return `<option value="${esc(option.value)}">${esc(option.label)}</option>`; }).join("")}</select></label>`;
-    if (kind === "check") return `<label class="field check-field${full}"><input name="${esc(name)}" type="checkbox" ${options.checked ? "checked" : ""}>${esc(label)}</label>`;
-    return `<label class="field${full}">${esc(label)}<input name="${esc(name)}" type="${esc(kind)}" ${options.required ? "required" : ""} ${options.min != null ? `min="${esc(options.min)}"` : ""} ${options.max != null ? `max="${esc(options.max)}"` : ""} ${options.step ? `step="${esc(options.step)}"` : ""} value="${esc(options.value ?? "")}" placeholder="${esc(options.placeholder || "")}"></label>`;
+
+  function setView(view) {
+    state.view = view;
+    document.querySelectorAll("[data-view-panel]").forEach(panel => panel.classList.toggle("active", panel.dataset.viewPanel === view));
+    document.querySelectorAll("[data-view]").forEach(button => { const active = button.dataset.view === view; button.classList.toggle("active", active); button.setAttribute("aria-current", active ? "page" : "false"); });
+    $("#page-title").textContent = t(view);
+    scrollTo({ top:0, behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth" });
   }
-  function options(list, fallback) { return (list?.length ? list : fallback).map(value => ({ value, label: value })); }
-  function formFor(tab, profile) {
-    const habitOptions = (profile?.habits || []).map(habit => ({ value: habit.id, label: habit.name }));
-    let fields = "";
-    if (tab === "mood") fields = field("Score · 1–10", "score", "number", { min: 1, max: 10, value: 7, required: true }) + field("Tags · comma separated", "tags", "text", { placeholder: "Calm, focused" }) + field("Note · optional", "note", "textarea", { full: true, placeholder: "A few words, if useful…", max: 10000 });
-    if (tab === "meal") fields = field("Date", "date", "date", { value: localDate(), required: true }) + field("Meal", "field", "select", { options: [{ value: "breakfast", label: "Breakfast" }, { value: "lunch", label: "Lunch" }, { value: "dinner", label: "Dinner" }, { value: "snackCount", label: "Snack count" }] }) + `<label class="field check-field" id="meal-toggle"><input name="value" type="checkbox" checked>Mark this meal complete</label><label class="field hidden" id="snack-count">Snack count<input name="valueCount" type="number" min="0" max="100" step="1" value="0"></label>`;
-    if (tab === "habit") fields = field("Habit", "habitId", "select", { options: habitOptions.length ? habitOptions : [{ value: "", label: "Import a Capture Profile first" }] }) + field("Date", "date", "date", { value: localDate(), required: true });
-    if (tab === "task") fields = field("Title", "title", "text", { full: true, required: true, max: 300 }) + field("Due date · optional", "dueDate", "date") + field("Priority", "priority", "select", { options: ["low", "medium", "high"] }) + field("Description · optional", "description", "textarea", { full: true, max: 10000 });
-    if (tab === "note") fields = field("Title · optional", "title", "text", { full: true, max: 300 }) + field("Content", "content", "textarea", { full: true, required: true, max: 100000 }) + field("Tags · comma separated", "tags", "text", { full: true });
-    if (tab === "journal") fields = field("Date", "date", "date", { value: localDate(), required: true }) + field("Mood · optional", "mood", "number", { min: 1, max: 10 }) + field("Title · optional", "title", "text", { full: true, max: 300 }) + field("Content", "content", "textarea", { full: true, required: true, max: 100000 }) + field("Tags · comma separated", "tags", "text", { full: true });
-    if (["english", "workout", "sleep", "nap"].includes(tab)) fields = `<p class="hint full">Start a local timer now. Finish time is captured from the device clock; LifeOS recalculates duration from these timestamps during import.</p>`;
-    const action = ["english", "workout", "sleep", "nap"].includes(tab) ? `<button class="button primary" type="button" id="start-timer">Start ${esc(labels[tab])}</button>` : `<button class="button primary" type="submit">Save ${esc(labels[tab])}</button>`;
-    return `<form id="capture-form"><div class="form-grid">${fields}</div><div class="actions">${action}</div></form>`;
+
+  function renderNavigation() {
+    const items = [["today","⌂","navToday"],["capture","＋","navCapture"],["pending","↥","navPending"],["settings","⚙","navSettings"]];
+    $("#bottom-nav").setAttribute("aria-label", t("navigation"));
+    $("#bottom-nav").innerHTML = items.map(([view,icon,key]) => `<button type="button" data-view="${view}" class="nav-item ${state.view===view?"active":""}"><span class="nav-icon">${icon}</span><span>${esc(t(key))}</span></button>`).join("");
+    $("#bottom-nav").querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
   }
-  async function renderForm() {
-    const profile = await get("state", "profile");
-    $("#tabs").innerHTML = types.map(type => `<button type="button" class="tab ${type === activeTab ? "active" : ""}" data-tab="${type}">${esc(labels[type])}</button>`).join("");
-    $("#form-area").innerHTML = formFor(activeTab, profile?.value);
-    $("#tabs").querySelectorAll("button").forEach(button => button.addEventListener("click", () => { activeTab = button.dataset.tab; renderForm(); }));
-    $("#capture-form").addEventListener("submit", saveForm);
-    if (activeTab === "meal") $("#capture-form [name=field]").addEventListener("change", event => { const snacks = event.target.value === "snackCount"; $("#meal-toggle").classList.toggle("hidden", snacks); $("#snack-count").classList.toggle("hidden", !snacks); });
-    $("#start-timer")?.addEventListener("click", startTimer);
+
+  function quickCard(type, secondary = false) { return `<button type="button" class="capture-card${secondary?" secondary-card":""}" data-tab="${type}" data-capture="${type}"><span class="capture-icon">${icons[type]}</span><span>${esc(t(type))}</span></button>`; }
+  function activeLabel(kind) { return t({english:"studying",workout:"training",sleep:"sleeping",nap:"napping"}[kind]); }
+  function elapsed(startedAt) { const seconds = Math.max(0, Math.floor((Date.now()-Date.parse(startedAt))/1000)); return `${String(Math.floor(seconds/3600)).padStart(2,"0")}:${String(Math.floor(seconds%3600/60)).padStart(2,"0")}:${String(seconds%60).padStart(2,"0")}`; }
+
+  async function renderToday(events, timer) {
+    const todayEvents = events.filter(event => localDate(new Date(event.occurredAt)) === localDate()).sort((a,b) => b.occurredAt.localeCompare(a.occurredAt));
+    const active = timer ? `<article class="active-card"><div><span class="section-kicker">${esc(t("activeSession"))}</span><h2>${esc(activeLabel(timer.kind))}</h2>${timer.metadata?.courseName?`<p>${esc(timer.metadata.courseName)}</p>`:""}${timer.metadata?.bodyPart?`<p>${esc(localizePart(timer.metadata.bodyPart))}</p>`:""}<div id="timer-clock" class="timer-clock">${elapsed(timer.startedAt)}</div><span class="meta">${esc(t("startedAt",{time:localTime(timer.startedAt)}))}</span></div><div class="active-actions"><button id="finish-timer" class="button primary" type="button">${esc(timer.kind==="sleep"?t("wakeUp"):timer.kind==="nap"?t("finishNap"):t("finish"))}</button><button id="cancel-timer" class="button quiet" type="button">${esc(t("cancelSession"))}</button></div></article>` : "";
+    $("#view-today").innerHTML = `${active}<section class="content-section"><div class="section-title"><h2>${esc(t("quickCapture"))}</h2></div><div class="quick-grid">${["mood","meal","english","workout","sleep","note"].map(type=>quickCard(type)).join("")}</div><div class="secondary-grid">${["habit","task","journal","nap"].map(type=>quickCard(type,true)).join("")}</div></section><section class="content-section"><div class="section-title"><h2>${esc(t("todayActivity"))}</h2><span class="count-badge">${todayEvents.length}</span></div><div class="activity-list">${todayEvents.length?todayEvents.map(activityRow).join(""):`<div class="empty-state">${esc(t("noTodayActivity"))}</div>`}</div></section>`;
+    bindCaptureButtons($("#view-today"));
+    $("#finish-timer")?.addEventListener("click", finishTimer);
+    $("#cancel-timer")?.addEventListener("click", cancelTimer);
   }
-  const splitTags = value => value.split(",").map(item => item.trim()).filter(Boolean).slice(0, 20);
-  function valueOf(form, name) { return new FormData(form).get(name)?.toString().trim() || ""; }
-  async function saveForm(event) {
-    event.preventDefault(); const form = event.currentTarget;
-    if (!form.reportValidity()) return;
-    const date = valueOf(form, "date");
-    switch (activeTab) {
-      case "mood": await addEvent("mood.log", { score: Number(valueOf(form, "score")), tags: splitTags(valueOf(form, "tags")), note: valueOf(form, "note") || undefined }); break;
-      case "meal": {
-        const fieldName = valueOf(form, "field");
-        const value = fieldName === "snackCount" ? Number(valueOf(form, "valueCount")) : form.elements.namedItem("value").checked;
-        if (fieldName === "snackCount" && (!Number.isInteger(value) || value < 0 || value > 100)) { toast("Snack count must be a whole number from 0–100."); return; }
-        await addEvent("meal.update", { date, field: fieldName, value }); break;
-      }
-      case "habit": if (!valueOf(form, "habitId")) { toast("Import a current Capture Profile first."); return; } await addEvent("habit.complete", { habitId: valueOf(form, "habitId"), date }); break;
-      case "task": await addEvent("task.create", { title: valueOf(form, "title"), description: valueOf(form, "description") || undefined, dueDate: valueOf(form, "dueDate") || undefined, priority: valueOf(form, "priority") || undefined }); break;
-      case "note": await addEvent("note.create", { title: valueOf(form, "title") || undefined, content: valueOf(form, "content"), tags: splitTags(valueOf(form, "tags")) }); break;
-      case "journal": await addEvent("journal.create", { date, title: valueOf(form, "title") || undefined, content: valueOf(form, "content"), mood: valueOf(form, "mood") ? Number(valueOf(form, "mood")) : undefined, tags: splitTags(valueOf(form, "tags")) }); break;
-    }
-    if (!["english", "workout", "sleep", "nap"].includes(activeTab)) { form.reset(); if (form.elements.date) form.elements.date.value = localDate(); }
-  }
-  async function startTimer() {
-    const existing = await get("state", "activeTimer");
-    if (existing) { toast("A timer is already running. Finish it before starting another."); return; }
-    const startedAt = new Date().toISOString();
-    const timer = { key: "activeTimer", value: { kind: activeTab, startedAt, metadata: {} } };
-    await put("state", timer); await renderTimer(); toast(`${labels[activeTab]} timer started.`);
-  }
-  async function finishTimer() {
-    const row = await get("state", "activeTimer"); if (!row) return;
-    const timer = row.value; const endedAt = new Date().toISOString();
-    if (Date.parse(endedAt) <= Date.parse(timer.startedAt)) { toast("Device time must be later than the start time."); return; }
-    const fields = timer.kind === "english" ? `<h3>Finish English</h3>${field("Course name", "courseName", "text", { value: "English", max: 300 })}${field("Category", "category", "select", { options: ["course", "listening", "speaking", "reading", "vocabulary", "writing", "youtube", "podcast", "other"] })}${field("Note · optional", "note", "textarea")}`
-      : timer.kind === "workout" ? `<h3>Finish workout</h3>${field("Body part", "bodyPart", "select", { options: options((await get("state", "profile"))?.value?.workoutBodyParts, ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio", "Other"]) })}${field("Quality · optional", "quality", "number", { min: 1, max: 5 })}${field("Note · optional", "note", "textarea")}`
-      : `<h3>Finish ${esc(timer.kind)}</h3>${field("Quality · optional", "quality", "number", { min: 1, max: 5 })}${field("Note · optional", "note", "textarea")}`;
-    $("#finish-fields").innerHTML = fields;
-    const dialog = $("#finish-dialog"); dialog.showModal();
-    $("#finish-save").onclick = async click => {
-      click.preventDefault(); const form = $("#finish-form");
-      if (!form.reportValidity()) return;
-      const numberOpt = key => valueOf(form, key) ? Number(valueOf(form, key)) : undefined;
-      let type, payload;
-      if (timer.kind === "english") { type = "english.session"; payload = { startedAt: timer.startedAt, endedAt, courseName: valueOf(form, "courseName") || "English", category: valueOf(form, "category") || undefined, note: valueOf(form, "note") || undefined }; }
-      else if (timer.kind === "workout") { type = "workout.session"; payload = { startedAt: timer.startedAt, endedAt, bodyPart: valueOf(form, "bodyPart"), quality: numberOpt("quality"), note: valueOf(form, "note") || undefined }; }
-      else { type = "sleep.session"; payload = { kind: timer.kind, startedAt: timer.startedAt, endedAt, quality: numberOpt("quality"), note: valueOf(form, "note") || undefined }; }
-      await addEvent(type, payload, new Date(endedAt)); await remove("state", "activeTimer"); dialog.close(); await renderTimer();
-    };
-  }
-  async function renderTimer() {
-    const row = await get("state", "activeTimer"); const panel = $("#timer-panel");
-    if (!row) { panel.classList.add("hidden"); panel.innerHTML = ""; return; }
-    panel.classList.remove("hidden"); const timer = row.value; const elapsed = Math.max(0, Date.now() - Date.parse(timer.startedAt)); const time = new Date(elapsed).toISOString().slice(11, 19);
-    const finishLabel = timer.kind === "sleep" ? "Wake Up" : timer.kind === "nap" ? "Finish Nap" : "Finish";
-    panel.innerHTML = `<div class="timer-inner"><div><div class="timer-type">${esc(labels[timer.kind])} · in progress</div><div class="timer-clock">${time}</div><div class="event-meta">Started ${esc(new Date(timer.startedAt).toLocaleString())} · stored locally</div></div><button id="finish-timer" class="button primary">${finishLabel}</button></div>`;
-    $("#finish-timer").addEventListener("click", finishTimer);
-  }
+
+  function activityRow(event) { const summary = summarize(event); return `<article class="activity-row"><span class="activity-time">${esc(localTime(event.occurredAt))}</span><span class="activity-icon">${icons[eventFamily(event.type)] || "·"}</span><div><strong>${esc(summary.title)}</strong>${summary.detail?`<p>${esc(summary.detail)}</p>`:""}</div></article>`; }
+  function eventFamily(type) { return type.split(".")[0] === "meal" ? "meal" : type.split(".")[0]; }
   function summarize(event) {
     const p = event.payload;
-    if (event.type === "mood.log") return `Mood ${p.score}/10`;
-    if (event.type === "meal.update") return `${p.field} · ${p.date}`;
-    if (event.type === "habit.complete") return `Habit · ${p.date}`;
-    if (event.type === "task.create") return p.title;
-    if (event.type === "note.create" || event.type === "journal.create") return p.title || p.content.split(/\r?\n/)[0];
-    if (event.type === "english.session") return `${p.courseName || "English"} · ${duration(p)}`;
-    if (event.type === "workout.session") return `${p.bodyPart} · ${duration(p)}`;
-    if (event.type === "sleep.session") return `${p.kind} · ${duration(p)}`;
-    return event.type;
+    if (event.type === "mood.log") return { title:`${t("mood")} ${p.score}/10`, detail:p.note || "" };
+    if (event.type === "meal.update") return { title:t(p.field === "snackCount" ? "snack" : p.field), detail:p.field === "snackCount"?String(p.value):"" };
+    if (event.type === "habit.complete") return { title:t("habit"), detail:"" };
+    if (event.type === "task.create") return { title:t("task"), detail:p.title };
+    if (event.type === "note.create") return { title:t("note"), detail:p.content.slice(0,80) };
+    if (event.type === "journal.create") return { title:t("journal"), detail:p.title || p.content.slice(0,80) };
+    if (event.type === "english.session") return { title:t("english"), detail:`${p.courseName || t("english")} · ${durationText(p)}` };
+    if (event.type === "workout.session") return { title:t("workout"), detail:`${localizePart(p.bodyPart)} · ${durationText(p)}` };
+    if (event.type === "sleep.session") return { title:t(p.kind), detail:durationText(p) };
+    return { title:event.type, detail:"" };
   }
-  function duration(payload) { return `${Math.max(0, Math.round((Date.parse(payload.endedAt) - Date.parse(payload.startedAt)) / 60000))} min`; }
-  async function renderQueue() {
-    const events = (await all("events")).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    $("#pending-count").textContent = String(events.length);
-    diagnostic("pending", String(events.length));
-    $("#queue").innerHTML = events.length ? events.map(item => `<article class="queue-item"><div class="min-w-0"><div class="event-title">${esc(summarize(item)).slice(0, 160)}</div><div class="event-meta">${esc(item.type)} · ${esc(new Date(item.occurredAt).toLocaleString())}</div></div><button class="delete" data-delete="${esc(item.id)}">Remove</button></article>`).join("") : `<p class="hint">Nothing waiting. Captures you make offline will appear here.</p>`;
-    $("#queue").querySelectorAll("[data-delete]").forEach(button => button.addEventListener("click", async () => { if (confirm("Remove this pending capture from this device?")) { await remove("events", button.dataset.delete); await renderQueue(); toast("Capture removed."); } }));
-    await renderBatches();
+  function durationText(payload) { return t("durationMinutes", { count:Math.max(0,Math.round((Date.parse(payload.endedAt)-Date.parse(payload.startedAt))/60000)) }); }
+
+  function renderCapture() {
+    const groups = [["daily",["mood","meal","habit"]],["learning",["english","task"]],["health",["workout","sleep","nap"]],["writing",["note","journal"]]];
+    $("#view-capture").innerHTML = `<p class="view-intro">${esc(t("captureSubtitle"))}</p>${groups.map(([label,types])=>`<section class="capture-group"><h2>${esc(t(label))}</h2><div class="capture-list">${types.map(type=>`<button type="button" data-tab="${type}" data-capture="${type}"><span class="capture-icon">${icons[type]}</span><span>${esc(t(type))}</span><span class="chevron">›</span></button>`).join("")}</div></section>`).join("")}`;
+    bindCaptureButtons($("#view-capture"));
   }
-  async function exportBundle() {
-    const events = (await all("events")).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    if (!events.length) { toast("There are no pending captures to export."); return; }
-    if (events.length > 500) { toast("A sync bundle can contain at most 500 captures. Export, sync, then export the remainder."); return; }
-    const deviceId = await getDeviceId(); let bundle;
-    try { bundle = bundleTransport.createBundle(events, deviceId); } catch (error) { toast(error.message); return; }
-    const { batchId, exportedAt } = bundle.meta;
-    const batch = { batchId, eventIds: events.map(item => item.id), exportedAt, eventCount: events.length };
-    await put("batches", batch);
-    downloadJson(bundle, `lifeos-sync-${stamp(new Date())}.json`);
-    await renderBatches(); toast("Bundle exported. Import it in LifeOS → Settings → Data.");
+  function bindCaptureButtons(root) { root.querySelectorAll("[data-capture]").forEach(button => button.addEventListener("click", () => openCapture(button.dataset.capture))); }
+
+  async function openCapture(type) {
+    if (!captureTypes.includes(type)) return;
+    const profile = (await get("state","profile"))?.value;
+    $("#sheet-title").textContent = t(type); $("#sheet-close").textContent = "×"; $("#sheet-close").setAttribute("aria-label",t("close"));
+    const body = $("#sheet-body"); body.innerHTML = captureForm(type,profile); const sheet = $("#capture-sheet"); sheet.showModal();
+    $("#capture-form")?.addEventListener("submit", event => saveCaptureForm(event,type));
+    body.querySelectorAll("[data-score]").forEach(button => button.addEventListener("click", () => { body.querySelectorAll("[data-score]").forEach(item=>item.classList.remove("selected")); button.classList.add("selected"); body.querySelector("[name=score]").value=button.dataset.score; }));
+    body.querySelectorAll("[data-meal]").forEach(button => button.addEventListener("click", () => saveMeal(button.dataset.meal)));
+    body.querySelectorAll("[data-habit]").forEach(button => button.addEventListener("click", () => saveHabit(button.dataset.habit)));
+    $("#sheet-import-profile")?.addEventListener("click",()=>{ sheet.close(); $("#profile-file").click(); });
   }
-  function stamp(date) { return `${localDate(date)}-${String(date.getHours()).padStart(2, "0")}${String(date.getMinutes()).padStart(2, "0")}${String(date.getSeconds()).padStart(2, "0")}`; }
-  function downloadJson(data, filename) { const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 2000); }
-  async function renderBatches() {
-    const batches = (await all("batches")).sort((a, b) => b.exportedAt.localeCompare(a.exportedAt));
-    $("#batch-area").innerHTML = batches.length ? batches.map(batch => `<div class="batch-item"><span class="event-meta">Batch ${esc(batch.batchId.slice(0, 8))} · ${batch.eventCount} captures · ${esc(new Date(batch.exportedAt).toLocaleString())}</span></div>`).join("") : "";
-    $("#manual-batch").innerHTML = batches.length ? batches.map(batch => `<option value="${esc(batch.batchId)}">${esc(new Date(batch.exportedAt).toLocaleString())} · ${batch.eventCount} captures · ${esc(batch.batchId.slice(0, 8))}</option>`).join("") : `<option value="">No exported batches</option>`;
-    $("#manual-confirm").disabled = !batches.length;
+
+  function captureForm(type,profile) {
+    if (type === "mood") return `<form id="capture-form"><p class="sheet-question">${esc(t("moodQuestion"))}</p><div class="score-grid">${Array.from({length:10},(_,i)=>`<button type="button" data-score="${i+1}">${i+1}</button>`).join("")}</div><input type="hidden" name="score">${field(t("moodTags"),"tags","text",{placeholder:t("moodTagsPlaceholder")})}${field(t("moodNote"),"note","textarea",{full:true})}${submitButton(t("moodSave"))}</form>`;
+    if (type === "meal") return `<div><p class="sheet-question">${esc(t("mealQuestion"))}</p><div class="choice-grid">${["breakfast","lunch","dinner","snack"].map(item=>`<button class="choice-button" type="button" data-meal="${item}"><span>${icons.meal}</span>${esc(t(item))}</button>`).join("")}</div></div>`;
+    if (type === "habit") return profile?.habits?.length ? `<div class="habit-options">${profile.habits.map(habit=>`<button class="habit-button" type="button" data-habit="${esc(habit.id)}"><span>✓</span>${esc(habit.name)}</button>`).join("")}</div>` : `<div class="empty-state prominent"><strong>${esc(t("habitNoProfile"))}</strong><p>${esc(t("habitNoProfileHelp"))}</p><button id="sheet-import-profile" class="button primary" type="button">${esc(t("importProfile"))}</button></div>`;
+    if (type === "task") return `<form id="capture-form">${field(t("taskName"),"title","text",{required:true,full:true})}${field(t("dateOptional"),"dueDate","date")}${field(t("noteOptional"),"description","textarea",{full:true})}${submitButton(t("taskSave"))}</form>`;
+    if (type === "note") return `<form id="capture-form">${field("","content","textarea",{required:true,full:true,max:100000,placeholder:t("quickNotePlaceholder")})}${submitButton(t("noteSave"))}</form>`;
+    if (type === "journal") return `<form id="capture-form">${field(t("titleOptional"),"title","text",{full:true})}${field(t("content"),"content","textarea",{required:true,full:true,max:100000})}${field(t("tagsOptional"),"tags","text",{full:true})}${submitButton(t("journalSave"))}</form>`;
+    if (type === "english") return `<form id="capture-form">${field(t("course"),"courseName","text",{required:true,full:true,placeholder:t("coursePlaceholder")})}${field(t("category"),"category","select",{full:true,options:englishCategories()})}${submitButton(t("startLearning"))}</form>`;
+    if (type === "workout") return `<form id="capture-form">${field(t("trainingPart"),"bodyPart","select",{full:true,options:workoutParts(profile)})}${submitButton(t("startWorkout"))}</form>`;
+    return `<form id="capture-form"><div class="one-tap-start"><span class="capture-icon large">${icons[type]}</span><p>${esc(type==="sleep"?t("startSleep"):t("startNap"))}</p></div>${submitButton(type==="sleep"?t("startSleep"):t("startNap"))}</form>`;
   }
-  async function parseFile(file) { if (!file || file.size > 2 * 1024 * 1024) throw new Error("Choose a JSON file smaller than 2 MB."); return JSON.parse(await file.text()); }
-  async function importProfile(file) {
-    try { const profile = await parseFile(file); if (!protocol.validProfile(profile)) throw new Error("This is not a valid LifeOS Capture Profile."); await put("state", { key: "profile", value: profile }); await renderForm(); $("#profile-status").textContent = `${profile.habits.length} active habits · profile from ${new Date(profile.generatedAt).toLocaleString()}.`; toast("Capture profile imported."); }
-    catch (error) { toast(error.message || "Unable to import profile."); }
-    finally { $("#profile-file").value = ""; }
-  }
-  async function importReceipt(file) {
+  function englishCategories(){return [["course","courseCategory"],["listening","listening"],["speaking","speaking"],["reading","reading"],["vocabulary","vocabulary"],["writing","writingCategory"],["youtube","youtube"],["podcast","podcast"],["other","other"]].map(([value,key])=>({value,label:t(key)}));}
+  function workoutParts(profile){const fallback=["Chest","Back","Shoulders","Arms","Legs","Core","Full body","Cardio","Other"];return (profile?.workoutBodyParts?.length?profile.workoutBodyParts:fallback).map(value=>({value,label:localizePart(value)}));}
+  function localizePart(value){const key={chest:"chest",back:"back",shoulders:"shoulders",arms:"arms",legs:"legs",core:"core","full body":"fullBody",cardio:"cardio",other:"other"}[String(value).toLowerCase()];return key?t(key):value;}
+
+  async function saveCaptureForm(event,type) {
+    event.preventDefault(); const form=event.currentTarget; if(!form.reportValidity())return;
     try {
-      const receipt = await parseFile(file);
-      if (!protocol.validReceipt(receipt)) throw new Error("This is not a successful LifeOS import receipt.");
-      const batch = await get("batches", receipt.meta.batchId); const device = await getDeviceId();
-      if (!batch || !protocol.receiptMatchesBatch(receipt, batch, device)) throw new Error("Receipt does not match this exported batch and device; nothing was removed.");
-      await clearBatch(batch);
-      await renderQueue(); toast(`Confirmed ${batch.eventCount} synced captures.`);
-    } catch (error) { toast(error.message || "Unable to import receipt."); }
-    finally { $("#receipt-file").value = ""; }
+      if(type==="mood"){const score=Number(valueOf(form,"score"));if(!score){toast(t("moodRequired"));return;}await addEvent("mood.log",{score,tags:splitTags(valueOf(form,"tags")),note:valueOf(form,"note")||undefined});}
+      else if(type==="task")await addEvent("task.create",{title:valueOf(form,"title"),description:valueOf(form,"description")||undefined,dueDate:valueOf(form,"dueDate")||undefined});
+      else if(type==="note")await addEvent("note.create",{content:valueOf(form,"content"),tags:[]});
+      else if(type==="journal")await addEvent("journal.create",{date:localDate(),title:valueOf(form,"title")||undefined,content:valueOf(form,"content"),tags:splitTags(valueOf(form,"tags"))});
+      else await startTimer(type,{courseName:valueOf(form,"courseName")||undefined,category:valueOf(form,"category")||undefined,bodyPart:valueOf(form,"bodyPart")||undefined});
+      $("#capture-sheet").close();
+      toast(t(type==="task"?"taskSaved":type==="note"?"noteSaved":type==="journal"?"journalSaved":type==="mood"?"savedOnDevice":"savedOnDevice"));
+    } catch(error){toast(userError(error));}
   }
-  async function markBatch() {
-    const batch = await get("batches", $("#manual-batch").value); if (!batch) return;
-    if (!confirm(`Only mark this batch synced after LifeOS confirms import.\n\nRemove ${batch.eventCount} local captures from this device?`)) return;
-    const answer = prompt("Type SYNCED to confirm the LifeOS import was successful."); if (answer !== "SYNCED") { toast("Batch kept pending."); return; }
-    await clearBatch(batch);
-    await renderQueue(); toast("Batch marked synced.");
-  }
-  async function pairingState() { return (await get("state", "localSync"))?.value || null; }
-  async function savePairing(value) { await put("state", { key: "localSync", value }); }
-  function directTransport(state) { return new DirectLocalSyncTransport(state.hostUrl, state.syncToken); }
-  async function setComputerStatus(message, available = false) {
-    $("#computer-status").textContent = message;
-    $("#computer-status").classList.toggle("warning", !available);
-    $("#sync-now").disabled = !available;
-    diagnostic("computer", available ? "Available" : "Unavailable");
-  }
-  async function checkComputer({ retry = true, auto = false } = {}) {
-    const state = await pairingState();
-    if (!state) { await setComputerStatus("Not paired · sync bundles remain available."); return false; }
-    try {
-      const health = await directTransport(state).health(retry ? 3 : 1);
-      if (health.serverId !== state.serverId) { await setComputerStatus("A different LifeOS installation answered. Pair again before syncing."); return false; }
-      state.lastSeenAt = new Date().toISOString(); await savePairing(state);
-      const pending = (await all("events")).length; const last = state.lastSyncAt ? ` · last sync ${new Date(state.lastSyncAt).toLocaleString()}` : "";
-      await setComputerStatus(`Computer available · ${pending ? `${pending} pending` : "all synced"}${last}`, true);
-      $("#open-lifeos").href = `${state.hostUrl}/today`; $("#open-lifeos").classList.remove("hidden");
-      if (auto && $("#auto-sync").checked && (await all("events")).length) await beginDirectSync(true);
-      return true;
-    } catch (error) {
-      const browserBlocked = isSecureContext && state.hostUrl.startsWith("http:");
-      const pending = (await all("events")).length;
-      const network = !navigator.onLine ? "Computer unavailable · this device is offline" : browserBlocked ? "Direct sync unavailable in this browser · use Sync Bundle" : "Computer unavailable; its address may have changed";
-      await setComputerStatus(`${network} · ${pending} pending. Your captures are safe on this device and can be synced later.${error.message ? ` ${error.message}` : ""}`);
-      return false;
-    }
-  }
-  async function buildPendingBundle() {
-    const events = (await all("events")).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    if (!events.length) throw new Error("There are no pending captures to sync.");
-    if (events.length > 500) throw new Error("Direct sync supports at most 500 captures at a time.");
-    const bundle = bundleTransport.createBundle(events, await getDeviceId());
-    const batch = { batchId: bundle.meta.batchId, eventIds: events.map(item => item.id), exportedAt: bundle.meta.exportedAt, eventCount: events.length };
-    await put("batches", batch); return { bundle, batch };
-  }
-  async function beginDirectSync(auto = false) {
-    const button = $("#sync-now"); button.disabled = true;
-    try {
-      const state = await pairingState(); if (!state) throw new Error("Pair this device first.");
-      const { bundle, batch } = await buildPendingBundle(); const transport = directTransport(state); const preview = await transport.preview(bundle);
-      const panel = $("#sync-preview"); panel.classList.remove("hidden");
-      panel.innerHTML = `<h3>Review direct sync</h3><p>${preview.eventCount} captures · ${preview.new} new · ${preview.alreadyProcessed} already processed · ${preview.invalid} invalid</p><p>${esc(Object.entries(preview.counts).map(([key,value]) => `${key}: ${value}`).join(" · ") || "No new records")}</p><div class="actions"><button id="cancel-direct" class="button secondary">Keep pending</button><button id="confirm-direct" class="button primary">Confirm sync</button></div>`;
-      const commit = async () => {
-        $("#confirm-direct").disabled = true;
-        try {
-          const result = await transport.commit(bundle);
-          if (!protocol.receiptMatchesBatch(result.receipt, batch, await getDeviceId())) throw new Error("LifeOS returned a receipt that does not exactly match this batch; captures were kept.");
-          await clearBatch(batch); state.lastSyncAt = new Date().toISOString(); await savePairing(state); panel.classList.add("hidden"); await renderQueue(); toast(`Synced ${batch.eventCount} captures to LifeOS.`);
-        } catch (error) { toast(`${error.message || "Sync failed."} Captures remain on this device.`); $("#confirm-direct").disabled = false; }
-      };
-      $("#cancel-direct").onclick = () => panel.classList.add("hidden"); $("#confirm-direct").onclick = commit;
-      if (auto) await commit();
-    } catch (error) { toast(error.message || "Unable to sync. Captures remain on this device."); }
-    finally { button.disabled = false; }
-  }
-  async function pairComputer(event) {
-    event.preventDefault(); const form = event.currentTarget; if (!form.reportValidity()) return;
-    const submit = $("#pair-save"); submit.disabled = true;
-    try {
-      const hostUrl = valueOf(form, "hostUrl"); const serverId = valueOf(form, "serverId"); const code = valueOf(form, "code"); const existing = await pairingState(); const transport = new DirectLocalSyncTransport(hostUrl); const health = await transport.health(1);
-      if (health.serverId !== serverId) throw new Error("Server ID does not match the LifeOS computer at this address.");
-      if (!code) {
-        if (!existing?.syncToken || existing.serverId !== serverId) throw new Error("Enter a fresh pairing code for this LifeOS installation.");
-        await savePairing({ ...existing, hostUrl: transport.hostUrl, lastSeenAt: new Date().toISOString() });
-        $("#pair-dialog").close(); toast("Computer address updated."); await checkComputer({ retry: false }); return;
-      }
-      const paired = await transport.pair(serverId, await getDeviceId(), code);
-      await savePairing({ hostUrl: transport.hostUrl, serverId: paired.serverId, syncToken: paired.syncToken, pairedAt: paired.pairedAt, lastSeenAt: new Date().toISOString(), lastSyncAt: null });
-      $("#pair-dialog").close(); toast("Capture Client paired with LifeOS."); await checkComputer({ retry: false });
-    } catch (error) { toast(error.message || "Pairing failed."); }
-    finally { submit.disabled = false; }
-  }
-  async function openPairDialog() {
-    const state = await pairingState(); const form = $("#pair-form"); if (state) { form.elements.hostUrl.value = state.hostUrl; form.elements.serverId.value = state.serverId; } $("#pair-dialog").showModal();
-  }
-  async function updateConnection() { const node = $("#connection"); const auto = (await get("state", "autoSync"))?.value === true; node.textContent = navigator.onLine ? `On this device · auto-sync ${auto ? "on" : "off"}` : "Offline ready · captures stay here"; node.classList.toggle("offline", !navigator.onLine); }
-  async function waitForOfflineShell(registration) {
-    if (!isSecureContext || !navigator.serviceWorker) return "unavailable:service worker API unavailable";
-    try {
-      await Promise.race([
-        registration?.active?.state === "activated" ? Promise.resolve() : new Promise((resolve, reject) => {
-          const worker = registration?.installing || registration?.waiting || registration?.active;
-          if (!worker) { reject(new Error("no service worker instance")); return; }
-          const timer = setTimeout(() => reject(new Error("activation timed out")), 3000);
-          const changed = () => { if (worker.state === "activated") { clearTimeout(timer); worker.removeEventListener("statechange", changed); resolve(); } };
-          worker.addEventListener("statechange", changed); changed();
-        })
-      ]);
-      if (!registration?.active || registration.active.state !== "activated" || !self.caches) return `unavailable:registration=${Boolean(registration)}, active=${registration?.active?.state || "none"}, cacheAPI=${Boolean(self.caches)}`;
-      const shell = await caches.match(new URL("./index.html", location.href).href);
-      return shell ? "ready" : "missing";
-    } catch (error) { return `unavailable:${error instanceof Error ? error.message : String(error)}`; }
-  }
-  async function init() {
-    diagnostic("secure", isSecureContext ? "Yes" : "No");
-    diagnostic("service-worker", "Checking"); diagnostic("indexeddb", "Checking"); diagnostic("device", "Checking");
-    const runtime = await initializeCaptureRuntime({ secureContext: isSecureContext, indexedDbAvailable: Boolean(self.indexedDB), openDatabase: openDb, readDeviceId: getDeviceId, registerServiceWorker: self.navigator?.serviceWorker ? () => navigator.serviceWorker.register("./service-worker.js", { scope: "./" }) : undefined });
-    diagnostic("indexeddb", runtime.indexedDb === "available" ? "Available" : "Unavailable");
-    diagnostic("device", runtime.deviceId === "ready" ? "Ready" : "Unavailable");
-    if (runtime.storageError) {
-      diagnostic("storage-error", "Error", runtime.storageError);
-      if (runtime.indexedDb !== "available") diagnostic("indexeddb", "Unavailable", runtime.storageError);
-      showInitializationError(runtime.indexedDb === "available" ? "Device ID unavailable" : "Storage unavailable", new Error(runtime.storageError)); return;
-    }
-    diagnostic("storage-error", "None");
-    const profile = await get("state", "profile"); if (profile) $("#profile-status").textContent = `${profile.value.habits.length} active habits · profile from ${new Date(profile.value.generatedAt).toLocaleString()}.`;
-    await renderForm(); await renderQueue(); await renderTimer(); await updateConnection();
-    const syncPreference = await get("state", "autoSync"); $("#auto-sync").checked = syncPreference?.value === true;
-    $("#export-button").addEventListener("click", exportBundle);
-    $("#profile-file").addEventListener("change", event => importProfile(event.target.files[0]));
-    $("#receipt-file").addEventListener("change", event => importReceipt(event.target.files[0]));
-    $("#manual-confirm").addEventListener("click", markBatch);
-    $("#pair-button").addEventListener("click", openPairDialog); $("#pair-form").addEventListener("submit", pairComputer); $("#sync-now").addEventListener("click", () => beginDirectSync(false));
-    $("#auto-sync").addEventListener("change", async event => { await put("state", { key: "autoSync", value: event.target.checked }); await updateConnection(); if (event.target.checked) await checkComputer({ retry: false, auto: true }); });
-    addEventListener("online", updateConnection); addEventListener("offline", updateConnection); setInterval(renderTimer, 1000);
-    addEventListener("online", () => checkComputer({ retry: false, auto: true })); document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkComputer({ retry: true, auto: true }); });
-    await checkComputer({ retry: true, auto: true });
-    if (runtime.serviceWorker === "offline-install-unavailable-http") diagnostic("service-worker", "Offline install unavailable on HTTP");
-    else if (runtime.serviceWorker === "available") {
-      const shell = await waitForOfflineShell(runtime.serviceWorkerRegistration);
-      diagnostic("service-worker", shell === "ready" ? "Registered / Active" : "Registered");
-      const detail = shell === "ready" ? "" : shell === "missing" ? "shell cache is empty" : shell.startsWith("unavailable:") ? shell.slice("unavailable:".length) : "service worker is not active";
-      diagnostic("offline-shell", shell === "ready" ? "Ready" : "Offline shell unavailable", detail);
-    }
-    else diagnostic("service-worker", "Offline shell unavailable", runtime.serviceWorker.replace("offline-shell-unavailable: ", ""));
-    if (runtime.serviceWorker === "offline-install-unavailable-http") diagnostic("offline-shell", "Offline install unavailable on HTTP");
-    else if (runtime.serviceWorker !== "available") diagnostic("offline-shell", "Unavailable");
-  }
-  init().catch(error => { diagnostic("storage-error", "Initialization error", error instanceof Error ? error.message : String(error)); showInitializationError("Capture initialization failed", error); });
+  async function saveMeal(meal){const events=await all("events");const date=localDate();if(meal==="snack"){const previous=events.filter(event=>event.type==="meal.update"&&event.payload.date===date&&event.payload.field==="snackCount").sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.payload.value||0;await addEvent("meal.update",{date,field:"snackCount",value:previous+1});}else await addEvent("meal.update",{date,field:meal,value:true});$("#capture-sheet").close();toast(t("mealSaved"));}
+  async function saveHabit(habitId){await addEvent("habit.complete",{habitId,date:localDate()});$("#capture-sheet").close();toast(t("habitDone"));}
+
+  async function startTimer(kind,metadata={}){if(await get("state","activeTimer")){toast(t("timerAlreadyRunning"));return;}await put("state",{key:"activeTimer",value:{kind,startedAt:new Date().toISOString(),metadata:Object.fromEntries(Object.entries(metadata).filter(([,value])=>value))}});await refreshUI();}
+  async function cancelTimer(){if(!confirm(t("cancelSessionConfirm")))return;await remove("state","activeTimer");await refreshUI();}
+  async function finishTimer(){const row=await get("state","activeTimer");if(!row)return;const timer=row.value;const endedAt=new Date().toISOString();$("#finish-title").textContent=t({english:"finishEnglish",workout:"finishWorkout",sleep:"finishSleep",nap:"finishNapTitle"}[timer.kind]);$("#finish-keep").textContent=t("keepRunning");$("#finish-save").textContent=t("saveSession");$("#finish-form .icon-button").textContent="×";$("#finish-form .icon-button").setAttribute("aria-label",t("close"));const rating=timer.kind==="english"?"":`<div class="field"><span>${esc(t("qualityOptional"))}</span><div class="quality-grid">${[1,2,3,4,5].map(value=>`<button type="button" data-quality="${value}">${value}</button>`).join("")}</div><input type="hidden" name="quality"></div>`;$("#finish-fields").innerHTML=`<div class="session-summary"><strong>${esc(durationText({startedAt:timer.startedAt,endedAt}))}</strong><span>${esc(localTime(timer.startedAt))}–${esc(localTime(endedAt))}</span></div>${rating}${field(t("sessionNoteOptional"),"note","textarea",{full:true})}`;$("#finish-fields").querySelectorAll("[data-quality]").forEach(button=>button.addEventListener("click",()=>{$("#finish-fields").querySelectorAll("[data-quality]").forEach(item=>item.classList.remove("selected"));button.classList.add("selected");$("#finish-fields [name=quality]").value=button.dataset.quality;}));$("#finish-dialog").showModal();$("#finish-save").onclick=async click=>{click.preventDefault();const form=$("#finish-form");const note=valueOf(form,"note")||undefined;const quality=valueOf(form,"quality")?Number(valueOf(form,"quality")):undefined;let type,payload;if(timer.kind==="english"){type="english.session";payload={startedAt:timer.startedAt,endedAt,courseName:timer.metadata?.courseName||t("english"),category:timer.metadata?.category||"other",note};}else if(timer.kind==="workout"){type="workout.session";payload={startedAt:timer.startedAt,endedAt,bodyPart:timer.metadata?.bodyPart||"Other",quality,note};}else{type="sleep.session";payload={kind:timer.kind,startedAt:timer.startedAt,endedAt,quality,note};}await addEvent(type,payload,new Date(endedAt));await remove("state","activeTimer");$("#finish-dialog").close();await refreshUI();toast(t("sessionSaved"));};}
+
+  async function renderPending(events,batches){const pairing=await pairingState();const online=state.computer==="online";const headline=events.length?t("pendingHeadline",{count:events.length}):t("noPending");const help=online?t("syncOnlineReady"):pairing?t("syncOfflineHelp"):t("syncUnpairedHelp");$("#view-pending").innerHTML=`<section class="sync-hero ${online?"online":""}"><span class="status-dot"></span><div><span>${esc(online?t("computerOnline"):pairing?t("computerOffline"):t("computerUnpaired"))}</span><h2>${esc(headline)}</h2><p>${esc(help)}</p></div><button id="sync-now" class="button primary wide" type="button" ${!online||!events.length||state.syncing?"disabled":""}>${esc(state.syncing?t("syncing"):t("syncNow"))}</button></section><div id="sync-preview">${renderSyncPreview()}</div><section class="content-section"><div class="section-title"><h2>${esc(t("pendingList"))}</h2><span id="pending-count" class="count-badge">${events.length}</span></div><div id="queue" class="pending-list">${events.length?events.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map(pendingRow).join(""):`<div class="empty-state">${esc(t("pendingEmpty"))}</div>`}</div></section><details class="fallback-card"><summary>${esc(t("bundleQuestion"))}</summary><p>${esc(t("bundleHelp"))}</p><div class="stack-actions"><button id="export-button" class="button secondary wide" type="button">${esc(t("exportBundle"))}</button><button id="import-receipt-button" class="button secondary wide" type="button">${esc(t("importReceipt"))}</button></div><div id="batch-area">${renderBatches(batches)}</div><label class="field"><span>${esc(t("manualFallback"))}</span><select id="manual-batch">${batches.length?batches.map(batch=>`<option value="${esc(batch.batchId)}">${esc(formatDate(new Date(batch.exportedAt),{dateStyle:"short",timeStyle:"short"}))} · ${batch.eventCount}</option>`).join(""):`<option value="">${esc(t("noBatches"))}</option>`}</select></label><button id="manual-confirm" class="button quiet wide" type="button" ${batches.length?"":"disabled"}>${esc(t("markSynced"))}</button></details>`;
+    $("#sync-now").addEventListener("click",()=>beginDirectSync(false));$("#export-button").addEventListener("click",exportBundle);$("#import-receipt-button").addEventListener("click",()=>$("#receipt-file").click());$("#manual-confirm").addEventListener("click",markBatch);$("#queue").querySelectorAll("[data-delete]").forEach(button=>button.addEventListener("click",()=>deletePending(button.dataset.delete)));$("#queue").querySelectorAll("[data-detail]").forEach(button=>button.addEventListener("click",()=>showEventDetail(events.find(event=>event.id===button.dataset.detail))));bindSyncPreview();}
+  function pendingRow(event){const summary=summarize(event);return `<article class="pending-row"><span class="activity-icon">${icons[eventFamily(event.type)]||"·"}</span><button type="button" data-detail="${esc(event.id)}"><strong>${esc(summary.title)}</strong><span>${esc(summary.detail)}</span><small>${esc(localTime(event.occurredAt))}</small></button><button class="remove-button" type="button" data-delete="${esc(event.id)}" aria-label="${esc(t("remove"))}">×</button></article>`;}
+  function showEventDetail(event){if(!event)return;const summary=summarize(event);$("#sheet-title").textContent=t("detailTitle");$("#sheet-body").innerHTML=`<div class="detail-card"><span>${icons[eventFamily(event.type)]||"·"}</span><h3>${esc(summary.title)}</h3><p>${esc(summary.detail)}</p><small>${esc(formatDate(new Date(event.occurredAt),{dateStyle:"medium",timeStyle:"short"}))}</small></div>`;$("#capture-sheet").showModal();}
+  async function deletePending(id){if(!confirm(t("removePendingConfirm")))return;await remove("events",id);await refreshUI();toast(t("removed"));}
+  function renderBatches(batches){return batches.map(batch=>`<div class="batch-item">${esc(formatDate(new Date(batch.exportedAt),{dateStyle:"short",timeStyle:"short"}))} · ${batch.eventCount}</div>`).join("");}
+  function renderSyncPreview(){if(!state.syncPreview)return"";const preview=state.syncPreview;return `<div class="preview-card"><strong>${esc(t("syncPreview",{count:preview.eventCount,newCount:preview.new}))}</strong><div class="sheet-actions"><button id="cancel-direct" class="button secondary">${esc(t("cancel"))}</button><button id="confirm-direct" class="button primary">${esc(t("syncNow"))}</button></div></div>`;}
+  function bindSyncPreview(){$("#cancel-direct")?.addEventListener("click",()=>{state.syncPreview=null;refreshUI();});$("#confirm-direct")?.addEventListener("click",commitDirectSync);}
+
+  async function renderSettings(profile,pairing,autoSync){const profileText=profile?t("profileImported",{count:profile.habits.length,time:formatDate(new Date(profile.generatedAt),{dateStyle:"short",timeStyle:"short"})}):t("profileMissing");$("#view-settings").innerHTML=`<section class="settings-card"><h2>${esc(t("language"))}</h2><div class="segmented"><button type="button" data-locale="zh-CN" class="${getLocale()==="zh-CN"?"active":""}">${esc(t("simplifiedChinese"))}</button><button type="button" data-locale="en" class="${getLocale()==="en"?"active":""}">${esc(t("englishLanguage"))}</button></div></section><section class="settings-card"><div class="settings-row"><div><h2>${esc(t("computerConnection"))}</h2><p>${esc(pairing?`${t("connected")} · ${pairing.hostUrl}`:t("notConnected"))}</p></div><span class="state-label">${esc(state.computer==="online"?t("computerOnline"):t("computerOffline"))}</span></div><button id="pair-button" class="button secondary wide" type="button">${esc(pairing?t("updateComputer"):t("connectComputer"))}</button>${pairing&&state.computer==="online"?`<a id="open-lifeos" class="button quiet wide" href="${esc(pairing.hostUrl)}/today" target="_blank" rel="noopener">${esc(t("openFullLifeOS"))}</a>`:""}</section><section class="settings-card"><label class="switch-row"><div><h2>${esc(t("autoSync"))}</h2><p>${esc(t("autoSyncHelp"))}</p></div><input id="auto-sync" type="checkbox" ${autoSync?"checked":""}></label></section><section class="settings-card"><h2>${esc(t("captureProfile"))}</h2><p id="profile-status">${esc(profileText)}</p><button id="import-profile-button" class="button secondary wide" type="button">${esc(t("importProfileShort"))}</button></section><section class="settings-card"><h2>${esc(t("dataSafety"))}</h2><p>${esc(t("dataSafetyText"))}</p><button id="settings-export" class="button secondary wide" type="button">${esc(t("exportBundle"))}</button><small>${esc(t("storageWarning"))}</small></section><details class="settings-card advanced"><summary>${esc(t("advanced"))}</summary><div class="advanced-content">${pairing?`<div class="diagnostic-row"><span>${esc(t("serverId"))}</span><span>${esc(pairing.serverId)}</span></div>`:""}<h3>${esc(t("diagnostics"))}</h3><div class="diagnostic-grid">${diagnosticRows()}</div></div></details>`;
+    $("#view-settings").querySelectorAll("[data-locale]").forEach(button=>button.addEventListener("click",()=>setLocale(button.dataset.locale)));$("#pair-button").addEventListener("click",openPairDialog);$("#auto-sync").addEventListener("change",async event=>{await put("state",{key:"autoSync",value:event.target.checked});if(event.target.checked)await checkComputer({retry:false,auto:true});});$("#import-profile-button").addEventListener("click",()=>$("#profile-file").click());$("#settings-export").addEventListener("click",exportBundle);}
+  function diagnosticRows(){const rows=[["indexedDb","indexeddb"],["secureContext","secure"],["serviceWorker","serviceWorker"],["offlineShell","offlineShell"],["deviceId","device"],["computer","computer"],["pendingDiagnostic","pending"],["storageError","storageError"]];return rows.map(([label,key])=>`<div class="diagnostic-row"><span>${esc(t(label))}</span><span id="diagnostic-${key.replace(/[A-Z]/g,m=>`-${m.toLowerCase()}`)}">${esc(diagnosticText(key))}</span></div>`).join("")+`<div class="diagnostic-row"><span>${esc(t("errorCode"))}</span><span>${esc(state.lastErrorCode||t("none"))}</span></div>`;}
+  function diagnosticText(key){if(key==="computer")return state.computer==="online"?t("computerOnline"):t("computerOffline");if(key==="pending")return String(state.pending||0);const value=state.diagnostics[key];return t({available:"available",unavailable:"unavailable",yes:"yes",no:"no",ready:"ready",active:"activated",checking:"checking",none:"none"}[value]||value||"none");}
+
+  async function refreshUI(){const [events,timerRow,profileRow,pairing,batches,autoRow]=await Promise.all([all("events"),get("state","activeTimer"),get("state","profile"),pairingState(),all("batches"),get("state","autoSync")]);state.pending=events.length;$("#today-date").textContent=formatDate(new Date(),getLocale()==="zh-CN"?{month:"long",day:"numeric",weekday:"long"}:{month:"short",day:"numeric",weekday:"long"});$("#page-title").textContent=t(state.view);const status=$("#header-status");status.classList.toggle("online",state.computer==="online");status.innerHTML=`<span class="status-dot"></span><span>${esc(state.computer==="online"?t("computerOnline"):state.computer==="unpaired"?t("computerUnpaired"):t("computerOffline"))}<small>${esc(events.length?t("pendingCount",{count:events.length}):t("allSynced"))}</small></span>`;status.onclick=()=>setView("pending");renderNavigation();await renderToday(events,timerRow?.value);renderCapture();await renderPending(events,batches.sort((a,b)=>b.exportedAt.localeCompare(a.exportedAt)));await renderSettings(profileRow?.value,pairing,autoRow?.value===true);setView(state.view);}
+
+  async function checkComputer({retry=true,auto=false}={}){const pairing=await pairingState();if(!pairing){state.computer="unpaired";await refreshUI();return false;}try{const health=await directTransport(pairing).health(retry?3:1);if(health.serverId!==pairing.serverId){const error=new Error("server mismatch");error.code="server_mismatch";throw error;}pairing.lastSeenAt=new Date().toISOString();await savePairing(pairing);state.computer="online";await refreshUI();if(auto&&(await get("state","autoSync"))?.value===true&&(await all("events")).length)await beginDirectSync(true);return true;}catch(error){state.computer="offline";userError(error,"secureConnectionFailed");await refreshUI();return false;}}
+  async function beginDirectSync(auto=false){try{const pairing=await pairingState();if(!pairing){setView("settings");return;}const events=(await all("events")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));if(!events.length){toast(t("noPending"));return;}const bundle=bundleTransport.createBundle(events,await getDeviceId());const batch={batchId:bundle.meta.batchId,eventIds:events.map(event=>event.id),exportedAt:bundle.meta.exportedAt,eventCount:events.length};await put("batches",batch);const preview=await directTransport(pairing).preview(bundle);state.syncPreview={...preview,bundle,batch};await refreshUI();if(auto)await commitDirectSync();}catch(error){toast(`${userError(error,"secureConnectionFailed")} ${t("useBundle")}`);}}
+  async function commitDirectSync(){const current=state.syncPreview;if(!current)return;state.syncing=true;await refreshUI();try{const pairing=await pairingState();const result=await directTransport(pairing).commit(current.bundle);if(!protocol.receiptMatchesBatch(result.receipt,current.batch,await getDeviceId()))throw new Error("receipt mismatch");await clearBatch(current.batch);pairing.lastSyncAt=new Date().toISOString();await savePairing(pairing);state.syncPreview=null;toast(t("syncedCount",{count:current.batch.eventCount}));}catch(error){toast(`${userError(error,"secureConnectionFailed")} ${t("useBundle")}`);}finally{state.syncing=false;await refreshUI();}}
+
+  async function exportBundle(){const events=(await all("events")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));if(!events.length){toast(t("noEventsToExport"));return;}try{const bundle=bundleTransport.createBundle(events,await getDeviceId());const batch={batchId:bundle.meta.batchId,eventIds:events.map(event=>event.id),exportedAt:bundle.meta.exportedAt,eventCount:events.length};await put("batches",batch);downloadJson(bundle,`lifeos-sync-${stamp(new Date())}.json`);await refreshUI();toast(t("exported"));}catch(error){toast(userError(error));}}
+  function downloadJson(data,filename){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));const anchor=document.createElement("a");anchor.href=url;anchor.download=filename;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),2000);}
+  function stamp(date){return`${localDate(date)}-${String(date.getHours()).padStart(2,"0")}${String(date.getMinutes()).padStart(2,"0")}${String(date.getSeconds()).padStart(2,"0")}`;}
+  async function parseFile(file){if(!file||file.size>2*1024*1024){const error=new Error();error.code="file_too_large";throw error;}return JSON.parse(await file.text());}
+  async function importProfile(file){try{const profile=await parseFile(file);if(!protocol.validProfile(profile))throw new Error("invalid profile");await put("state",{key:"profile",value:profile});await refreshUI();toast(t("profileImportSuccess"));}catch(error){toast(t(error.code==="file_too_large"?"fileTooLarge":"invalidFile"));}finally{$("#profile-file").value="";}}
+  async function importReceipt(file){try{const receipt=await parseFile(file);const batch=await get("batches",receipt?.meta?.batchId);if(!batch||!protocol.receiptMatchesBatch(receipt,batch,await getDeviceId()))throw new Error("invalid receipt");await clearBatch(batch);await refreshUI();toast(t("receiptConfirmed",{count:batch.eventCount}));}catch{toast(t("receiptInvalid"));}finally{$("#receipt-file").value="";}}
+  async function markBatch(){const batch=await get("batches",$("#manual-batch").value);if(!batch)return;if(!confirm(t("deleteBatchConfirm")))return;if(prompt(t("manualConfirmPrompt"))!=="SYNCED"){toast(t("batchKept"));return;}await clearBatch(batch);await refreshUI();toast(t("receiptConfirmed",{count:batch.eventCount}));}
+
+  async function openPairDialog(){const pairing=await pairingState();$("#pair-title").textContent=t("pairTitle");$("#pair-fields").innerHTML=`${field(t("lifeosComputerUrl"),"hostUrl","url",{required:true,full:true,value:pairing?.hostUrl||"",placeholder:"https://172.20.10.6:3443"})}${field(t("serverIdLabel"),"serverId","text",{required:true,full:true,value:pairing?.serverId||""})}${field(t("pairingCode"),"code","text",{full:true})}<p class="hint">${esc(t("pairingCodeHelp"))}</p>`;$("#pair-save").textContent=t("pairSave");$("#pair-cancel").textContent=t("cancel");$("#pair-form .icon-button").textContent="×";$("#pair-form .icon-button").setAttribute("aria-label",t("close"));$("#pair-dialog").showModal();}
+  async function pairComputer(event){event.preventDefault();const form=event.currentTarget;if(!form.reportValidity())return;const button=$("#pair-save");button.disabled=true;try{const hostUrl=valueOf(form,"hostUrl"),serverId=valueOf(form,"serverId"),code=valueOf(form,"code"),existing=await pairingState(),transport=new DirectLocalSyncTransport(hostUrl);const health=await transport.health(1);if(health.serverId!==serverId){const error=new Error();error.code="server_mismatch";throw error;}if(!code){if(!existing?.syncToken||existing.serverId!==serverId){const error=new Error();error.code="pairing_invalid";throw error;}await savePairing({...existing,hostUrl:transport.hostUrl,lastSeenAt:new Date().toISOString()});toast(t("addressUpdated"));}else{const paired=await transport.pair(serverId,await getDeviceId(),code);await savePairing({hostUrl:transport.hostUrl,serverId:paired.serverId,syncToken:paired.syncToken,pairedAt:paired.pairedAt,lastSeenAt:new Date().toISOString(),lastSyncAt:null});toast(t("paired"));}$("#pair-dialog").close();await checkComputer({retry:false});}catch(error){toast(userError(error,"secureConnectionFailed"));}finally{button.disabled=false;}}
+
+  async function waitForOfflineShell(registration){if(!isSecureContext||!navigator.serviceWorker)return"unavailable";try{await Promise.race([registration?.active?.state==="activated"?Promise.resolve():new Promise((resolve,reject)=>{const worker=registration?.installing||registration?.waiting||registration?.active;if(!worker){reject(new Error());return;}const timer=setTimeout(()=>reject(new Error()),3000);const changed=()=>{if(worker.state==="activated"){clearTimeout(timer);worker.removeEventListener("statechange",changed);resolve();}};worker.addEventListener("statechange",changed);changed();})]);if(!registration?.active||!self.caches)return"unavailable";return await caches.match(new URL("./index.html",location.href).href)?"ready":"unavailable";}catch{return"unavailable";}}
+  async function init(){document.documentElement.lang=getLocale();$("#sheet-close").addEventListener("click",()=>$("#capture-sheet").close());$("#pair-form").addEventListener("submit",pairComputer);$("#profile-file").addEventListener("change",event=>importProfile(event.target.files[0]));$("#receipt-file").addEventListener("change",event=>importReceipt(event.target.files[0]));addEventListener("lifeos:locale",refreshUI);const runtime=await initializeCaptureRuntime({secureContext:isSecureContext,indexedDbAvailable:Boolean(self.indexedDB),openDatabase:openDb,readDeviceId:getDeviceId,registerServiceWorker:self.navigator?.serviceWorker?()=>navigator.serviceWorker.register("./service-worker.js",{scope:"./"}):undefined});state.diagnostics.indexeddb=runtime.indexedDb;state.diagnostics.device=runtime.deviceId;state.diagnostics.storageError=runtime.storageError?"unavailable":"none";if(runtime.storageError){toast(t(runtime.indexedDb==="available"?"deviceIdUnavailable":"storageUnavailable"));return;}if(runtime.serviceWorker==="available"){state.diagnostics.serviceWorker="active";state.diagnostics.offlineShell=await waitForOfflineShell(runtime.serviceWorkerRegistration);}else{state.diagnostics.serviceWorker="unavailable";state.diagnostics.offlineShell="unavailable";}await refreshUI();setInterval(()=>{const clock=$("#timer-clock");get("state","activeTimer").then(row=>{if(clock&&row)clock.textContent=elapsed(row.value.startedAt);});},1000);addEventListener("online",()=>checkComputer({retry:false,auto:true}));addEventListener("offline",()=>{state.computer="offline";refreshUI();});document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")checkComputer({retry:true,auto:true});});await checkComputer({retry:true,auto:true});}
+  init().catch(error=>{state.lastErrorCode="initialization_failed";toast(userError(error,"initFailed"));});
 })();

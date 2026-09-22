@@ -1,33 +1,46 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="LifeOS Capture">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="LifeOS Capture">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'">
-  <meta name="theme-color" content="#f5f7f2"><meta name="description" content="Private offline LifeOS capture client">
-  <link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="./icon.svg"><link rel="stylesheet" href="./styles.css"><link rel="stylesheet" href="./sync.css">
-  <title>LifeOS Capture</title>
+  <meta name="theme-color" content="#f4f6f1">
+  <meta name="description" content="私密、离线优先的 LifeOS 移动记录工具">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./sync.css">
+  <title>LifeOS 随手记</title>
 </head>
 <body>
-  <main class="shell">
-    <header class="top"><div><p class="eyebrow">LIFEOS · OFFLINE CAPTURE</p><h1>A little, as it happens.</h1><p class="sub">Private to this device until you export a sync bundle.</p></div><div id="connection" class="connection">Starting capture…</div></header>
-    <details class="diagnostics"><summary>Diagnostics</summary><div class="diagnostic-grid"><span>IndexedDB</span><span id="diagnostic-indexeddb">Checking</span><span>Secure context</span><span id="diagnostic-secure">Checking</span><span>Service Worker</span><span id="diagnostic-service-worker">Checking</span><span>Offline shell</span><span id="diagnostic-offline-shell">Checking</span><span>Device ID</span><span id="diagnostic-device">Checking</span><span>Computer</span><span id="diagnostic-computer">Checking</span><span>Pending</span><span id="diagnostic-pending">0</span><span>Storage init error</span><span id="diagnostic-storage-error">None</span></div></details>
-    <section class="panel profile-row"><div><h2>Capture profile</h2><p id="profile-status">Import a profile from LifeOS to use your active habits and preferred options.</p></div><label class="button secondary file-button">Import profile<input id="profile-file" type="file" accept="application/json,.json"></label></section>
-    <section class="panel"><div class="section-head"><div><h2>Your computer</h2><p id="computer-status">Not paired · sync bundles remain available.</p></div><button id="pair-button" class="button secondary">Pair / update</button></div><div class="sync-row"><label class="check-field"><input id="auto-sync" type="checkbox">Auto-sync when this page is open</label><div class="actions compact"><a id="open-lifeos" class="button secondary hidden" target="_blank" rel="noopener">Open full LifeOS</a><button id="sync-now" class="button primary" disabled>Sync now</button></div></div><div id="sync-preview" class="sync-preview hidden"></div></section>
-    <section class="panel"><div class="section-head"><div><h2>Quick capture</h2><p>Saved on this device. No automatic network sync.</p></div></div>
-      <nav id="tabs" class="tabs" aria-label="Capture type"></nav><div id="form-area"></div>
-    </section>
-    <section id="timer-panel" class="panel timer hidden"></section>
-    <section class="panel"><div class="section-head queue-head"><div><h2>Pending captures <span id="pending-count" class="count">0</span></h2><p>Events remain here until you import a receipt or manually confirm a batch.</p></div><button id="export-button" class="button primary">Export sync bundle</button></div>
-      <div id="batch-area" class="batch-area"></div><div id="queue" class="queue"></div>
-    </section>
-    <section class="panel"><div class="section-head"><div><h2>Confirm an import</h2><p>Import the receipt downloaded by LifeOS after a successful sync.</p></div><label class="button secondary file-button">Import receipt<input id="receipt-file" type="file" accept="application/json,.json"></label></div>
-      <label class="manual-label" for="manual-batch">Manual fallback · select a previously exported batch</label><div class="manual-row"><select id="manual-batch"><option value="">No exported batches</option></select><button id="manual-confirm" class="button secondary">Mark synced…</button></div>
-    </section>
-    <footer><p>Pending captures are stored on this device until synced. Export a Sync Bundle if you want an extra copy.</p><p>Browser storage can be removed by the system. Keep an exported bundle for anything you cannot afford to lose.</p></footer>
-  </main>
-  <dialog id="finish-dialog"><form method="dialog" id="finish-form"><div id="finish-fields"></div><div class="actions"><button class="button secondary" value="cancel">Keep running</button><button id="finish-save" class="button primary" value="save">Save session</button></div></form></dialog>
-  <dialog id="pair-dialog"><form method="dialog" id="pair-form"><h3>Pair with your computer</h3><div class="form-grid"><label class="field full">LifeOS computer URL<input name="hostUrl" type="url" required placeholder="http://192.168.1.20:3000"></label><label class="field full">Server ID<input name="serverId" required autocomplete="off"></label><label class="field full">One-time code · leave blank only when updating a paired address<input name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code"></label></div><p class="hint">Generate these values in LifeOS → Settings → Data. Both devices must be on the same reachable network.</p><div class="actions"><button class="button secondary" value="cancel">Cancel</button><button id="pair-save" class="button primary" value="save">Pair / update</button></div></form></dialog>
+  <div class="app-shell shell">
+    <header class="app-header">
+      <div><div class="brand">LifeOS</div><h1 id="page-title"></h1><p id="today-date" class="header-date date-line"></p></div>
+      <button id="header-status" class="status-pill header-status" type="button" data-go="pending"></button>
+    </header>
+    <main id="main-content">
+      <section id="view-today" class="app-view active" data-view-panel="today"></section>
+      <section id="view-capture" class="app-view" data-view-panel="capture"></section>
+      <section id="view-pending" class="app-view" data-view-panel="pending"></section>
+      <section id="view-settings" class="app-view" data-view-panel="settings"></section>
+    </main>
+    <nav id="bottom-nav" class="bottom-nav"></nav>
+  </div>
+  <dialog id="capture-sheet" class="sheet"><div class="sheet-frame"><div class="sheet-grabber"></div><header class="sheet-header"><h2 id="sheet-title"></h2><button id="sheet-close" class="icon-button" type="button"></button></header><div id="sheet-body" class="sheet-body"></div></div></dialog>
+  <dialog id="finish-dialog" class="sheet"><form method="dialog" id="finish-form" class="sheet-frame"><div class="sheet-grabber"></div><header class="sheet-header"><h2 id="finish-title"></h2><button class="icon-button" value="cancel"></button></header><div id="finish-fields" class="sheet-body"></div><div class="sheet-actions"><button class="button secondary" value="cancel" id="finish-keep"></button><button id="finish-save" class="button primary" value="save"></button></div></form></dialog>
+  <dialog id="pair-dialog" class="sheet"><form method="dialog" id="pair-form" class="sheet-frame"><div class="sheet-grabber"></div><header class="sheet-header"><h2 id="pair-title"></h2><button class="icon-button" value="cancel"></button></header><div id="pair-fields" class="sheet-body"></div><div class="sheet-actions"><button class="button secondary" value="cancel" id="pair-cancel"></button><button id="pair-save" class="button primary" value="save"></button></div></form></dialog>
+  <input id="profile-file" class="visually-hidden" type="file" accept="application/json,.json">
+  <input id="receipt-file" class="visually-hidden" type="file" accept="application/json,.json">
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="./protocol.js" defer></script><script src="./storage.js" defer></script><script src="./runtime.js" defer></script><script src="./transports.js" defer></script><script src="./app.js" defer></script>
-</body></html>
+  <script src="./protocol.js" defer></script>
+  <script src="./storage.js" defer></script>
+  <script src="./runtime.js" defer></script>
+  <script src="./transports.js" defer></script>
+  <script src="./i18n.js" defer></script>
+  <script src="./app.js" defer></script>
+</body>
+</html>

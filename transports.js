@@ -25,9 +25,13 @@
         const localNetwork = typeof Request !== "undefined" && "targetAddressSpace" in Request.prototype ? { targetAddressSpace: "local" } : {};
         const response = await fetch(`${this.hostUrl}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: "no-store", credentials: "omit", referrerPolicy: "same-origin", ...localNetwork });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok || payload.ok === false) throw new Error(payload.error || `LifeOS returned ${response.status}.`);
+        if (!response.ok || payload.ok === false) {
+          const error = new Error(payload.error || `LifeOS returned ${response.status}.`);
+          error.code = payload.code || (response.status === 401 ? "unauthorized" : `http_${response.status}`);
+          throw error;
+        }
         return payload.data;
-      } catch (error) { if (error?.name === "AbortError") throw new Error("LifeOS did not respond within 2.5 seconds."); throw error; }
+      } catch (error) { if (error?.name === "AbortError") { const timeoutError = new Error("LifeOS did not respond within 2.5 seconds."); timeoutError.code = "network_error"; throw timeoutError; } if (!error?.code && /failed to fetch|network|load failed/i.test(error?.message || "")) error.code = "secure_connection_failed"; throw error; }
       finally { clearTimeout(timer); }
     }
     async health(attempts = 3) { let last; for (let attempt = 0; attempt < attempts; attempt += 1) { try { return await this.request("/api/local-sync/health", { timeout: 2000 }); } catch (error) { last = error; if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt)); } } throw last; }
