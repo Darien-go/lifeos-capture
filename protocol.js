@@ -12,7 +12,7 @@
     const p = event.payload;
     switch (event.type) {
       case "mood.log": return rating(p.score, 10) && tags(p.tags) && text(p.note, 10000, true);
-      case "meal.update": return date(p.date) && ["breakfast", "lunch", "dinner", "snackCount"].includes(p.field) && (p.field === "snackCount" ? Number.isInteger(p.value) && p.value >= 0 && p.value <= 100 : typeof p.value === "boolean");
+      case "meal.update": return date(p.date) && ["breakfast", "lunch", "dinner", "snackCount"].includes(p.field) && (p.field === "snackCount" ? Number.isInteger(p.value) && p.value >= 0 && p.value <= 100 : typeof p.value === "boolean") && text(p.content, 10000, true) && text(p.note, 10000, true) && tags(p.tags) && (p.fullness === undefined || rating(p.fullness, 5));
       case "habit.complete": return uuid(p.habitId) && date(p.date);
       case "task.create": return text(p.title, 300) && p.title.trim().length > 0 && text(p.description, 10000, true) && (p.priority === undefined || ["low", "medium", "high"].includes(p.priority)) && (p.dueDate === undefined || date(p.dueDate));
       case "note.create": return text(p.title, 300, true) && typeof p.content === "string" && p.content.length >= 1 && p.content.length <= 100000 && tags(p.tags);

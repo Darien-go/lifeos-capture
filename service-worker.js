@@ -1,4 +1,4 @@
-const CACHE = "lifeos-capture-shell-v4";
+const CACHE = "lifeos-capture-shell-v5";
 const SHELL = ["./index.html", "./styles.css", "./sync.css", "./protocol.js", "./storage.js", "./runtime.js", "./transports.js", "./i18n.js", "./app.js", "./manifest.webmanifest", "./icon.svg"];
 self.addEventListener("install", event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener("activate", event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith("lifeos-capture-shell-") && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
