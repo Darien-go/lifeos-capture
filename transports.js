@@ -13,6 +13,7 @@
       if (new Blob([JSON.stringify(bundle)]).size > MAX_BYTES) throw new Error("This bundle exceeds 2 MB. Sync some captures first.");
       return bundle;
     }
+    createBundleV2(events, deviceId, attachments, batchId = self.LifeOSCaptureRuntime.secureUuid()) { const bundle = { meta: { app: "LifeOS", kind: "offline-sync", version: 2, batchId, deviceId, exportedAt: new Date().toISOString() }, events, attachments }; if (!self.LifeOSOfflineProtocol.validBundleV2(bundle)) throw new Error("One or more captures do not match the current sync format."); if (new Blob([JSON.stringify(bundle)]).size > MAX_BYTES) throw new Error("This bundle exceeds 2 MB. Sync some captures first."); return bundle; }
   }
   class DirectLocalSyncTransport {
     constructor(hostUrl, token = "") { this.hostUrl = normalizeHost(hostUrl); this.token = token; }
@@ -38,6 +39,8 @@
     pair(serverId, deviceId, code) { return this.request("/api/local-sync/pair", { method: "POST", body: { serverId, deviceId, code }, timeout: 3000 }); }
     preview(bundle) { return this.request("/api/local-sync/preview", { method: "POST", body: bundle, authenticated: true, timeout: 3000 }); }
     commit(bundle) { return this.request("/api/local-sync/commit", { method: "POST", body: bundle, authenticated: true, timeout: 10000 }); }
+    prepareAttachments(attachments) { return this.request("/api/local-sync/attachments/prepare", { method: "POST", body: { attachments }, authenticated: true, timeout: 5000 }); }
+    async uploadAttachment(attachment) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); try { const response = await fetch(`${this.hostUrl}/api/local-sync/attachments/${attachment.id}`, { method: "POST", headers: { Accept: "application/json", Authorization: `Bearer ${this.token}`, "Content-Type": attachment.mimeType, "X-Attachment-Sha256": attachment.sha256, "X-Attachment-Mime": attachment.mimeType, "X-Attachment-Width": String(attachment.width || ""), "X-Attachment-Height": String(attachment.height || ""), "X-Attachment-Original-Name": attachment.originalName || "" }, body: attachment.blob, signal: controller.signal, cache: "no-store", credentials: "omit" }); const payload = await response.json().catch(() => ({})); if (!response.ok || payload.ok === false) throw new Error(payload.error || `LifeOS returned ${response.status}.`); return payload.data; } finally { clearTimeout(timer); } }
   }
   self.LifeOSSyncTransports = { BundleSyncTransport, DirectLocalSyncTransport, normalizeHost };
 })();
